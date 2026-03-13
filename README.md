@@ -226,6 +226,17 @@ Config                    Batch ~Tokens   Avg ms   P50 ms      Tok/s
 
 Single query: **6ms**. Peak throughput: **25.5K tok/s**.
 
+## Jina CLI integration
+
+jina-grep is available as `jina grep` in the unified [Jina CLI](https://github.com/jina-ai/cli):
+
+```bash
+pip install jina-cli
+jina grep "error handling" src/
+```
+
+The Jina CLI also supports `--local` mode for `jina embed` and `jina rerank`, using the jina-grep embedding server for local inference.
+
 ## License
 
 Apache-2.0
