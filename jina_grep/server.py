@@ -1,4 +1,4 @@
-"""FastAPI server for local embedding generation using pure MLX."""
+"""FastAPI server for local embedding generation (MLX on Apple Silicon, ONNX elsewhere)."""
 
 import os
 import signal
@@ -20,10 +20,20 @@ from .embedder import (
     VALID_PROMPT_NAMES,
     MAX_BATCH_SIZE,
     MAX_SEQ_LENGTH,
-    get_model,
+    LocalEmbedder,
 )
 
 app = FastAPI(title="Jina Grep Embedding Server")
+
+# Lazily-initialized embedder instance for the server endpoint
+_embedder: Optional[LocalEmbedder] = None
+
+
+def _get_embedder() -> LocalEmbedder:
+    global _embedder
+    if _embedder is None:
+        _embedder = LocalEmbedder()
+    return _embedder
 
 
 class EmbeddingRequest(BaseModel):
@@ -82,44 +92,16 @@ async def create_embeddings(request: EmbeddingRequest):
         )
 
     try:
-        cached = get_model(request.model, task)
+        embedder = _get_embedder()
+        embeddings_np = embedder.embed(
+            request.input,
+            model=request.model,
+            task=task,
+            prompt_name=request.prompt_name,
+        )
+        embeddings = embeddings_np.tolist()
     except (ValueError, RuntimeError) as e:
         raise HTTPException(status_code=400, detail=str(e))
-
-    try:
-        import mlx.core as mx
-
-        if is_code:
-            # Code models: (model, tokenizer) tuple
-            model, tokenizer = cached
-            prompt_type = request.prompt_name or "query"
-            if prompt_type == "document":
-                prompt_type = "passage"
-            embeddings = model.encode(
-                request.input,
-                tokenizer,
-                task=task,
-                prompt_type=prompt_type,
-                truncate_dim=request.truncate_dim,
-            )
-        else:
-            # v5 models: JinaMultiTaskModel with dynamic LoRA
-            multi_model = cached
-            multi_model.switch_task(task)
-
-            if task == "retrieval":
-                prompt_name = request.prompt_name or "query"
-                if prompt_name not in VALID_PROMPT_NAMES:
-                    raise HTTPException(status_code=400, detail=f"Invalid prompt_name: {prompt_name}")
-                task_type = f"retrieval.{prompt_name}" if prompt_name == "query" else "retrieval.passage"
-            else:
-                task_type = task
-            embeddings = multi_model.encode(
-                request.input,
-                task_type=task_type,
-            )
-        mx.eval(embeddings)
-        embeddings = embeddings.tolist()
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Encoding failed: {e}")
 
@@ -189,7 +171,7 @@ def is_server_running() -> tuple[bool, Optional[int]]:
     try:
         os.kill(pid, 0)
         return True, pid
-    except OSError:
+    except (OSError, PermissionError):
         remove_pid()
         return False, None
 
@@ -206,13 +188,16 @@ def start_server(host: str = "127.0.0.1", port: int = 8089, daemon: bool = True)
         log_dir.mkdir(exist_ok=True)
         log_file = log_dir / "server.log"
 
+        cmd = [sys.executable, "-m", "jina_grep.server", "--host", host, "--port", str(port)]
         with open(log_file, "a") as lf:
-            proc = subprocess.Popen(
-                [sys.executable, "-m", "jina_grep.server", "--host", host, "--port", str(port)],
-                stdout=lf,
-                stderr=lf,
-                start_new_session=True,
-            )
+            popen_kwargs = dict(stdout=lf, stderr=lf)
+            if sys.platform == "win32":
+                popen_kwargs["creationflags"] = (
+                    subprocess.CREATE_NO_WINDOW | subprocess.DETACHED_PROCESS
+                )
+            else:
+                popen_kwargs["start_new_session"] = True
+            proc = subprocess.Popen(cmd, **popen_kwargs)
         print(f"Server starting in background (PID: {proc.pid})")
         return
 
@@ -223,8 +208,9 @@ def start_server(host: str = "127.0.0.1", port: int = 8089, daemon: bool = True)
         remove_pid()
         sys.exit(0)
 
-    signal.signal(signal.SIGTERM, cleanup)
     signal.signal(signal.SIGINT, cleanup)
+    if sys.platform != "win32":
+        signal.signal(signal.SIGTERM, cleanup)
 
     try:
         uvicorn.run(app, host=host, port=port, log_level="info")
@@ -238,7 +224,11 @@ def stop_server():
         print("Server is not running")
         return
     try:
-        os.kill(pid, signal.SIGTERM)
+        if sys.platform == "win32":
+            import subprocess as sp
+            sp.run(["taskkill", "/F", "/PID", str(pid)], capture_output=True)
+        else:
+            os.kill(pid, signal.SIGTERM)
         print(f"Server stopped (PID: {pid})")
         remove_pid()
     except OSError as e:
@@ -268,8 +258,9 @@ if __name__ == "__main__":
         remove_pid()
         sys.exit(0)
 
-    signal.signal(signal.SIGTERM, cleanup)
     signal.signal(signal.SIGINT, cleanup)
+    if sys.platform != "win32":
+        signal.signal(signal.SIGTERM, cleanup)
 
     try:
         uvicorn.run(app, host=args.host, port=args.port, log_level="info")

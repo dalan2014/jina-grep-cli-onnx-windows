@@ -223,8 +223,11 @@ def grep_main(args=None):
         # Pipe mode: stdin has data and is not a TTY
         # Also check if files were provided -- if so, prefer standalone mode
         if not sys.stdin.isatty() and not files:
-            import select
-            if select.select([sys.stdin], [], [], 0.0)[0]:
+            has_stdin_data = True
+            if sys.platform != "win32":
+                import select
+                has_stdin_data = bool(select.select([sys.stdin], [], [], 0.0)[0])
+            if has_stdin_data:
                 exit_code = pipe_rerank(pattern, options)
                 sys.exit(exit_code)
 

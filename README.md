@@ -1,6 +1,8 @@
 # <img src="logo.svg?v=2" alt="" width="28" height="28" style="vertical-align: middle;"/> jina-grep
 
-Semantic grep powered by Jina embeddings, running locally on Apple Silicon via MLX.
+Semantic grep powered by Jina embeddings, running locally via MLX (macOS Apple Silicon) or ONNX Runtime (Windows/Linux).
+
+> **Fork note:** This is a cross-platform fork of [jina-ai/jina-grep-cli](https://github.com/jina-ai/jina-grep-cli). The original only supports macOS Apple Silicon. This fork adds Windows and Linux support via ONNX Runtime, while keeping full MLX compatibility on Mac.
 
 Four modes: pipe grep output for semantic reranking, search files directly with natural language, zero-shot classification, or code search.
 
@@ -12,35 +14,63 @@ Four modes: pipe grep output for semantic reranking, search files directly with 
 | jina-code-embeddings-1.5b | 1.54B | 1536 | 32768 | 128-1536 | nl2code, code2code, code2nl, code2completion, qa |
 | jina-code-embeddings-0.5b | 0.49B | 896 | 32768 | 64-896 | nl2code, code2code, code2nl, code2completion, qa |
 
-Unified MLX checkpoints with dynamic LoRA adapter switching (v5) or single checkpoint with instruction prefixes (code). One base model in memory for all tasks, adapter switching in 20ms. No PyTorch, no transformers - pure MLX on Metal GPU.
+## Platform Support
+
+| Platform | Backend | How it works |
+|----------|---------|-------------|
+| macOS Apple Silicon | MLX | Unified MLX checkpoints with dynamic LoRA adapter switching. Pure Metal GPU, no PyTorch. |
+| Windows / Linux | ONNX Runtime | Pre-exported ONNX models from HuggingFace. CPU inference, lightweight (~50MB runtime). |
+
+Backend is auto-detected at runtime. No configuration needed.
+
+**ONNX model availability:**
+
+| Model | ONNX Status |
+|-------|-------------|
+| v5-nano (all 4 tasks) | Official ONNX exports by Jina AI |
+| v5-small (all 4 tasks) | Official ONNX exports by Jina AI |
+| code-1.5b | Community ONNX export ([herMaster/jina-code-embeddings-1.5b-ONNX](https://huggingface.co/herMaster/jina-code-embeddings-1.5b-ONNX)) |
+| code-0.5b | Not available (MLX only) |
 
 ## Install
 
+**macOS (Apple Silicon):**
+
 ```bash
-git clone https://github.com/jina-ai/jina-grep-cli.git && cd jina-grep-cli
+git clone https://github.com/dalan2014/jina-grep-cli.git && cd jina-grep-cli
 uv venv .venv && source .venv/bin/activate
 uv pip install -e .
 ```
 
-Requirements: Python 3.10+, Apple Silicon Mac.
+**Windows / Linux:**
+
+```bash
+git clone https://github.com/dalan2014/jina-grep-cli.git && cd jina-grep-cli
+pip install .
+```
+
+Dependencies are platform-conditional: `mlx` is only installed on macOS ARM64, `onnxruntime` is installed elsewhere.
+
+Requirements: Python 3.10+.
 
 ## Usage
 
 Two modes:
 
-**Serverless (default):** Model loads in-process, runs the query, exits. No server, no background processes. Uses a unified MLX checkpoint with dynamic LoRA adapter switching (one base model for all tasks). MLX loads weights via mmap, so macOS keeps them in page cache after exit. Best for: occasional use, scripts, CI.
+**Serverless (default):** Model loads in-process, runs the query, exits. No server, no background processes. Best for: occasional use, scripts, CI.
 
-**Persistent server:** Keep a server running across invocations. Model stays in GPU memory, every query is ~10ms. Best for: interactive sessions, batch workloads.
+- On macOS: Uses MLX with dynamic LoRA adapter switching. MLX loads weights via mmap, so macOS keeps them in page cache after exit.
+- On Windows/Linux: Uses ONNX Runtime. Models are downloaded from HuggingFace on first use and cached locally.
+
+**Persistent server:** Keep a server running across invocations. Model stays in memory, every query is fast. Best for: interactive sessions, batch workloads.
 
 ```bash
 jina-grep serve start   # keep running in background
-# ... run as many queries as you want, each takes ~10ms ...
+# ... run as many queries as you want ...
 jina-grep serve stop    # stop when done
 ```
 
 Serverless mode auto-detects a running persistent server and uses it via HTTP (without stopping it afterwards).
-
-![Latency breakdown](https://raw.githubusercontent.com/jina-ai/jina-grep-cli/refs/heads/main/grep-latency-gantt.png)
 
 ### Pipe mode: rerank grep output
 
@@ -67,14 +97,13 @@ Use `--model` to switch to code embeddings and `--task` for code-specific tasks:
 jina-grep --model jina-code-embeddings-1.5b --task nl2code "sort a list in descending order" src/
 
 # Code to code: find similar code snippets
-jina-grep --model jina-code-embeddings-0.5b --task code2code "for i in range(len(arr))" src/
-
-# Code to natural language: find comments/docs matching code
-jina-grep --model jina-code-embeddings-1.5b --task code2nl "def binary_search(arr, target):" src/
+jina-grep --model jina-code-embeddings-1.5b --task code2code "for i in range(len(arr))" src/
 
 # Pipe mode works too
 grep -rn "def " src/ | jina-grep --model jina-code-embeddings-1.5b --task nl2code "HTTP retry with backoff"
 ```
+
+> Note: `jina-code-embeddings-0.5b` is only available on macOS Apple Silicon (no ONNX export exists yet).
 
 Code tasks:
 - `nl2code` - natural language query to code (default for code models)
@@ -146,96 +175,20 @@ Semantic flags:
   --granularity   line/paragraph/sentence/token (default: token)
 ```
 
-## Benchmark (M3 Ultra, 512GB)
+## Changes from upstream
 
-All models use `mx.fast.scaled_dot_product_attention` and `mx.fast.rope` for optimized inference.
+This fork adds cross-platform support while keeping full backward compatibility with the original:
 
-### v5-small (677M, 1024d)
+- **`embedder.py`**: Added ONNX Runtime backend with auto-detection. `LocalEmbedder` transparently uses MLX or ONNX based on platform.
+- **`server.py`**: Replaced inline MLX calls with `LocalEmbedder` abstraction. Fixed Windows signal handling, daemon creation, and process management.
+- **`cli.py`**: Fixed `select.select()` pipe detection for Windows.
+- **`pyproject.toml`**: Platform-conditional dependencies (`mlx` on macOS ARM64, `onnxruntime` elsewhere).
 
-```
-Config                    Batch ~Tokens   Avg ms   P50 ms      Tok/s
----------------------------------------------------------------------------
-1x short                      1       5      7.5      7.3        671
-1x medium                     1      56      9.8      9.7       5734
-1x long (~520 tok)            1     161     15.4     15.4      10448
-1x very long (~2.6K tok)      1     801     52.3     49.7      15320
-8x short                      8      40     10.3     10.2       3889
-32x short                    32     160     22.4     21.7       7138
-128x short                  128     640     56.9     53.5      11250
-256x short                  256    1280    106.3    106.6      12041
-8x long                       8    1288     66.8     66.7      19273
-32x long                     32    5152    238.5    239.2      21598
-```
+## Upstream
 
-Single query: **7.5ms**. Peak throughput: **21.6K tok/s**.
+Original project: [jina-ai/jina-grep-cli](https://github.com/jina-ai/jina-grep-cli)
 
-### v5-nano (239M, 768d)
-
-```
-Config                    Batch ~Tokens   Avg ms   P50 ms      Tok/s
----------------------------------------------------------------------------
-1x short                      1       6      3.0      3.2       1971
-1x medium                     1      57      3.4      3.4      16787
-1x long (~520 tok)            1     162      4.8      4.8      33634
-1x very long (~2.6K tok)      1     802     13.2     13.1      60931
-8x short                      8      48      4.2      4.1      11563
-32x short                    32     192      7.4      7.3      25796
-128x short                  128     768     17.8     17.8      43027
-256x short                  256    1536     34.6     34.6      44450
-8x long                       8    1296     18.3     18.3      70734
-32x long                     32    5184     67.3     67.2      76984
-```
-
-Single query: **3ms**. Peak throughput: **77K tok/s**.
-
-### code-1.5b (1.54B, 1536d)
-
-```
-Config                    Batch ~Tokens   Avg ms   P50 ms      Tok/s
----------------------------------------------------------------------------
-1x short                      1       5     14.6     11.2        343
-1x medium                     1      56     20.0     20.0       2797
-1x long (~520 tok)            1     161     34.0     34.0       4739
-1x very long (~2.6K tok)      1     801    117.1    113.5       6842
-8x short                      8      40     28.2     28.3       1418
-32x short                    32     160     72.6     71.4       2205
-128x short                  128     640    248.6    246.9       2574
-256x short                  256    1280    486.9    486.7       2629
-8x long                       8    1288    174.7    174.6       7374
-32x long                     32    5152    672.3    672.7       7664
-```
-
-Single query: **14.6ms**. Peak throughput: **7.7K tok/s**.
-
-### code-0.5b (0.49B, 896d)
-
-```
-Config                    Batch ~Tokens   Avg ms   P50 ms      Tok/s
----------------------------------------------------------------------------
-1x short                      1       5      6.0      5.8        828
-1x medium                     1      56      8.5      8.6       6558
-1x long (~520 tok)            1     161     12.3     12.3      13126
-1x very long (~2.6K tok)      1     801     40.1     38.1      19984
-8x short                      8      40      9.5      9.5       4192
-32x short                    32     160     25.3     25.2       6331
-128x short                  128     640     78.5     78.7       8152
-256x short                  256    1280    150.8    150.8       8487
-8x long                       8    1288     55.4     55.4      23248
-32x long                     32    5152    202.1    202.3      25491
-```
-
-Single query: **6ms**. Peak throughput: **25.5K tok/s**.
-
-## Jina CLI integration
-
-jina-grep is available as `jina grep` in the unified [Jina CLI](https://github.com/jina-ai/cli):
-
-```bash
-pip install jina-cli
-jina grep "error handling" src/
-```
-
-The Jina CLI also supports `--local` mode for `jina embed` and `jina rerank`, using the jina-grep embedding server for local inference.
+jina-grep is also available as `jina grep` in the unified [Jina CLI](https://github.com/jina-ai/cli).
 
 ## License
 
