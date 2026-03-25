@@ -333,7 +333,7 @@ class LocalEmbedder:
     def embed(
         self,
         texts: list[str],
-        model: str = "jina-embeddings-v5-nano",
+        model: str = "jina-embeddings-v5-small",
         task: str = "retrieval",
         prompt_name: str = None,
         batch_size: int = 256,

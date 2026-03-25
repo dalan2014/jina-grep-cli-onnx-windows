@@ -38,7 +38,7 @@ def _get_embedder() -> LocalEmbedder:
 
 class EmbeddingRequest(BaseModel):
     input: list[str]
-    model: str = "jina-embeddings-v5-nano"
+    model: str = "jina-embeddings-v5-small"
     task: str = "retrieval"
     prompt_name: Optional[str] = "query"
     truncate_dim: Optional[int] = None
